@@ -17,7 +17,7 @@ DJI Osmo Pocket 3 的四条通路全部实测过。这是结论和证据。
 | MI_03..MI_07 | — | **`Class_ff&SubClass_43&Prot_01`** | ❌ Error，无驱动 |
 
 五个 BULK 是 DJI 私有 DUML 通道（`SubClass 0x43` 是 DUML 典型子类）。
-实例 ID 形如 `USB\VID_2CA3&PID_0020&MI_0X\6&3958c552&1&000X`。
+实例 ID 形如 `USB\VID_2CA3&PID_0020&MI_0X\6&XXXXXXXX&1&000X`。
 
 ### 网络摄像头模式 `VID_2CA3&PID_0023`
 
@@ -94,7 +94,7 @@ fps 请求：60→29.8，50→30.1，30→30.3，25→25.1，24→24.2，15→24
 
 | 项 | 结果 |
 |---|---|
-| 广播 | `OsmoPocket3-6789` / `88:29:85:CF:C1:44` / rssi −37 |
+| 广播 | `OsmoPocket3-XXXX` / `AA:BB:CC:DD:EE:FF` / rssi −NN |
 | 服务 | `0000fff0`（DJI DUML）、`0000180f`（电量）、`00001812`（HID） |
 | 厂商数据 | `{2218 (0x08AA): 2000c0882985cfc144}`，`2000` = model id `0x0020` = Pocket 3 |
 | 特征 | `FFF3` `FFF4` `FFF5`（与所有逆向文档一致） |

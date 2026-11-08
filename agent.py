@@ -302,7 +302,8 @@ def main():
     ap.add_argument('--model', default=None)
     ap.add_argument('--base', default=None)
     ap.add_argument('--server', default='http://127.0.0.1:8770')
-    ap.add_argument('--api-key', default='demo123')
+    ap.add_argument('--api-key', default=None,
+                      help='LLM provider api key. Omit and the agent runs in mock mode.')
     ap.add_argument('--voice', action='store_true', help='record then transcribe first')
     ap.add_argument('--seconds', type=float, default=4.0)
     ap.add_argument('--no-speak', action='store_true')

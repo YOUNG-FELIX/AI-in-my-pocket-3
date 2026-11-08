@@ -20,6 +20,8 @@ Design notes that matter:
 
 import io
 import json
+import re
+import secrets
 import os
 import subprocess
 import sys
@@ -107,6 +109,7 @@ CAM = None
 AGENT = None
 PORT = 8770
 API_KEY = None
+ALLOW_CUSTOM_BASE = False
 TEXTURE_DEFAULT = {'brightness': 0.0, 'contrast': 1.0,
                    'saturation': 1.0, 'gamma': 1.0}
 
@@ -406,6 +409,28 @@ class Camera:
             pass
 
 
+def _safe_path(name, ext=''):
+    """Resolve a caller-supplied filename strictly inside FRAMES.
+
+    /api/call is reachable over the network, so an absolute path or a '..'
+    component would otherwise be an arbitrary-file-write primitive. Reject
+    both, then confirm the resolved path is still under FRAMES.
+    """
+    if not name:
+        return os.path.join(FRAMES, 'out_%d%s' % (int(time.time()), ext))
+    name = str(name).replace('\\', '/')
+    if os.path.isabs(name) or re.match(r'^[A-Za-z]:', name):
+        raise ValueError('path must be relative to the output directory')
+    parts = [p for p in name.split('/') if p not in ('', '.')]
+    if not parts or any(p == '..' for p in parts):
+        raise ValueError('path must not contain ".." or be empty')
+    root = os.path.abspath(FRAMES)
+    p = os.path.abspath(os.path.join(root, *parts))
+    if p != root and not p.startswith(root + os.sep):
+        raise ValueError('path escapes the output directory')
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Voice helpers
 # ---------------------------------------------------------------------------
@@ -415,7 +440,11 @@ def speak(text, rate=0, voice=None):
           '$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;'
           '$s.Rate = %d; ' % int(rate))
     if voice:
-        ps += "$s.SelectVoice('%s'); " % voice.replace("'", "''")
+        # Validate instead of escaping: anything outside this charset is
+        # refused outright, so nothing is ever interpolated as code.
+        if not re.fullmatch(r"[A-Za-z0-9 _.,()\[\]-]+", str(voice)):
+            raise ValueError('voice name contains unsupported characters')
+        ps += "$s.SelectVoice('%s'); " % voice
     ps += "$s.Speak([IO.File]::ReadAllText('%TXT%', [Text.Encoding]::UTF8))"
     fd, path = tempfile.mkstemp(suffix='.txt')
     with os.fdopen(fd, 'w', encoding='utf-8') as fh:
@@ -496,9 +525,7 @@ def t_see(cam, a):
     f = cam.grab(clean=str(a.get('clean', True)).lower() not in ('0', 'false'))
     if f is None:
         return {'error': 'no frame'}
-    p = a.get('path') or os.path.join(FRAMES, 'see_%d.jpg' % int(time.time()))
-    if not os.path.isabs(p):
-        p = os.path.join(FRAMES, p)
+    p = _safe_path(a.get('path'), '.jpg')
     cv2.imwrite(p, f)
     g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
     return {'path': p, 'width': int(f.shape[1]), 'height': int(f.shape[0]),
@@ -568,9 +595,7 @@ def t_scan(cam, a):
       'Record an MP4 clip at the streamed resolution.')
 def t_record(cam, a):
     secs = float(a.get('seconds', 5))
-    p = a.get('path') or os.path.join(FRAMES, 'rec_%d.mp4' % int(time.time()))
-    if not os.path.isabs(p):
-        p = os.path.join(FRAMES, p)
+    p = _safe_path(a.get('path'), '.mp4')
     vw = cv2.VideoWriter(p, cv2.VideoWriter_fourcc(*'mp4v'), 30,
                          (cam.width, cam.height))
     n, t0 = 0, time.perf_counter()
@@ -746,7 +771,7 @@ html,body{margin:0;height:100%;background:#0b0d10;color:#d7dce3;
   </div>
 </div>
 </div><script>
-const KEY=__KEY__;
+const KEY=(new URLSearchParams(location.search).get('key')||sessionStorage.getItem('p3key')||'');if(KEY){sessionStorage.setItem('p3key',KEY);}
 function tick(){const n=new Image();
   n.onload=()=>document.getElementById('im').src=n.src;
   n.src='/snap?t='+Date.now()+'&key='+KEY;}
@@ -838,7 +863,7 @@ class Handler(BaseHTTPRequestHandler):
         cam = CAM
 
         if u.path in ('/', '/index.html'):
-            body = PAGE.replace('__KEY__', json.dumps(API_KEY or ''))
+            body = PAGE.replace('__KEY__', json.dumps(''))
             return self._send(200, body, 'text/html; charset=utf-8')
         if not self._auth_ok(q):
             return self._send(401, {'error': 'bad or missing api key'})
@@ -932,15 +957,37 @@ def _configure_agent(body):
     if provider not in PROVIDERS:
         return {'ok': False, 'error': 'unknown provider %r' % provider,
                 'providers': sorted(PROVIDERS)}
+    try:
+        checked_base = _check_base(body.get('base'))
+    except ValueError as e:
+        return {'ok': False, 'error': str(e), 'providers': sorted(PROVIDERS)}
     AGENT = Agent(provider=provider,
                   key=body.get('key') or None,
                   model=body.get('model') or None,
-                  base=body.get('base') or None,
+                  base=checked_base,
                   server='http://127.0.0.1:%d' % PORT,
                   api_key=API_KEY)
     return {'ok': True, 'provider': AGENT.provider, 'model': AGENT.model,
             'ready': AGENT.ready,
             'reachable': _probe_provider(AGENT.base)}
+
+
+def _check_base(base):
+    """A custom base URL receives the LLM api key as a Bearer token.
+
+    Only allow one behind an explicit --allow-custom-base, and only over
+    https, so the key cannot be walked off to an arbitrary plaintext host.
+    """
+    if not base:
+        return None
+    base = str(base).strip()
+    if not ALLOW_CUSTOM_BASE:
+        raise ValueError(
+            'custom base URL is disabled because it would receive your LLM api '
+            'key; restart with --allow-custom-base to permit it')
+    if not base.lower().startswith('https://'):
+        raise ValueError('custom base URL must use https://')
+    return base
 
 
 def _probe_provider(base):
@@ -954,19 +1001,34 @@ def _probe_provider(base):
 
 
 def main():
-    global CAM, API_KEY, PORT
+    global CAM, API_KEY, PORT, ALLOW_CUSTOM_BASE
     ap = ArgumentParser()
     ap.add_argument('--port', type=int, default=8770)
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--index', type=int, default=1)
     ap.add_argument('--width', type=int, default=1280)
     ap.add_argument('--height', type=int, default=720)
-    ap.add_argument('--key', default=None)
+    ap.add_argument('--key', default=None,
+                      help='API key for the HTTP interface. Omit and a random one is '
+                           'generated; authentication is never off by default.')
+    ap.add_argument('--no-auth', action='store_true',
+                      help='Run with no key. Only for a trusted loopback setup.')
+    ap.add_argument('--allow-custom-base', action='store_true',
+                      help='Allow a custom LLM base URL. It receives your LLM api key.')
     ap.add_argument('--llm-provider', default='deepseek')
     ap.add_argument('--llm-key', default=None)
     ap.add_argument('--llm-model', default=None)
     a = ap.parse_args()
-    API_KEY = a.key
+    if a.no_auth:
+        API_KEY = None
+        print('WARNING: running with NO authentication (--no-auth).', flush=True)
+    elif a.key:
+        API_KEY = a.key
+    else:
+        API_KEY = secrets.token_urlsafe(18)
+        print('API key (generated): %s' % API_KEY, flush=True)
+        print('Pass it as ?key=... or the X-Api-Key header.', flush=True)
+    ALLOW_CUSTOM_BASE = a.allow_custom_base
     PORT = a.port
 
     try:
